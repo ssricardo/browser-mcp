@@ -253,7 +253,11 @@ function readField(el: Element): {
   return {
     hint,
     question,
-    value: select ? (select.selectedOptions[0]?.label ?? "") : value,
+    value: select
+      ? (select.selectedOptions[0]?.label ?? "")
+      : input.type === "password" && value
+        ? "(hidden)"
+        : value,
     required:
       input.required === true ||
       el.getAttribute("aria-required") === "true" ||

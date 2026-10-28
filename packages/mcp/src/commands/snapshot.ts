@@ -32,13 +32,14 @@ export function shortRef(page: Page, ref: string): string {
     : ref;
 }
 
-export async function takeSnapshot(page: Page): Promise<AriaNode[]> {
+async function readSnapshot(
+  page: Page,
+): Promise<{ nodes: AriaNode[]; prefix: string }> {
   const nodes = (await page.ariaSnapshotJSON({
     mode: "ai",
     timeout: 10_000,
   })) as AriaNode[];
   const prefix = /^(f\d+)e\d+$/.exec(nodes[0]?.ref ?? "")?.[1] ?? "";
-  mainPrefixes.set(page, prefix);
   if (prefix) {
     const strip = (list: AriaNode[]) => {
       for (const node of list) {
@@ -49,7 +50,23 @@ export async function takeSnapshot(page: Page): Promise<AriaNode[]> {
     };
     strip(nodes);
   }
+  return { nodes, prefix };
+}
+
+/** The agent's snapshot: its refs now resolve against this document (`fullRef`) */
+export async function takeSnapshot(page: Page): Promise<AriaNode[]> {
+  const { nodes, prefix } = await readSnapshot(page);
+  mainPrefixes.set(page, prefix);
   return nodes;
+}
+
+/**
+ * A snapshot the engine takes for itself (the change report): it doesn't touch which document the agent's refs resolve against, or a ref from before a navigation would hit the new page's element instead of failing. Returns the document's prefix, to tell whether the page navigated meanwhile
+ */
+export async function peekSnapshot(
+  page: Page,
+): Promise<{ nodes: AriaNode[]; prefix: string }> {
+  return readSnapshot(page);
 }
 
 const INTERACTIVE = new Set([
@@ -203,7 +220,7 @@ function keepLabelText(nodes: AriaNode[]): AriaNode[] {
   return out;
 }
 
-/** What the change report compares: interactive nodes by ref, as the line they render to (without `active`, which changes with every click), and the page's short texts (messages, errors, headings) */
+/** What the change report compares: interactive nodes by ref, as the line they render to (without `active`, which changes with every click, or their value), and the page's short texts (messages, errors, headings) */
 export type PageIndex = { controls: Map<string, string>; texts: Set<string> };
 
 const TEXT_MAX = 200;
@@ -225,9 +242,10 @@ export function pageIndex(nodes: AriaNode[]): PageIndex {
         (INTERACTIVE.has(node.role) || FORM_CONTROLS.has(node.role));
       if (control) {
         const { children, ...rest } = node;
+        // Without the value: the agent knows what it typed (a password must not come back), and `form` shows values on request
         controls.set(
           node.ref as string,
-          nodeLine({ ...rest, active: undefined }),
+          nodeLine({ ...rest, active: undefined, text: undefined }),
         );
       } else {
         addText(node.role === "text" ? node.text : (node.text ?? undefined));
@@ -250,17 +268,17 @@ export function sameIndex(a: PageIndex, b: PageIndex): boolean {
   return true;
 }
 
-/** What an action changed: new (`+`), gone (`-`) and changed (`~`) interactive elements, then texts that appeared (`+ text:`, error messages, toasts) or went away. Each list is capped; past the cap it says how many more, so a whole new step reads as a summary */
+/** What an action changed: new (`+`) and gone (`-`) interactive elements, and changed ones (`~`) unless `changed` is false (a fill or check changes its own field, which the agent expects), then texts that appeared (`+ text:`, error messages, toasts) or went away. Each list is capped; past the cap it says how many more, so a whole new step reads as a summary */
 export function diffPage(
   before: PageIndex,
   after: PageIndex,
-  max = 10,
+  { max = 10, changed = true } = {},
 ): string[] {
   const controls: string[] = [];
   for (const [ref, line] of after.controls) {
     const old = before.controls.get(ref);
     if (old === undefined) controls.push(`+ ${line}`);
-    else if (old !== line) controls.push(`~ ${line}`);
+    else if (changed && old !== line) controls.push(`~ ${line}`);
   }
   for (const [ref, line] of before.controls) {
     if (!after.controls.has(ref)) controls.push(`- ${line}`);

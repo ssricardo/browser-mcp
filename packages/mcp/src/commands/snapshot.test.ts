@@ -142,6 +142,19 @@ describe("diffPage", () => {
     ]);
   });
 
+  it("leaves out changed elements when asked, and never shows values", () => {
+    const before = pageIndex([
+      { role: "textbox", name: "Password", ref: "e1", text: "" },
+      { role: "button", name: "Next", disabled: true, ref: "e2" },
+    ]);
+    const after = pageIndex([
+      { role: "textbox", name: "Password", ref: "e1", text: "hunter2" },
+      { role: "button", name: "Next", ref: "e2" },
+    ]);
+    expect(diffPage(before, after)).toEqual(['~ button "Next" [ref=e2]']);
+    expect(diffPage(before, after, { changed: false })).toEqual([]);
+  });
+
   it("is empty when nothing changed", () => {
     const tree = [row("e1"), { role: "text", text: "Hello there" }];
     expect(sameIndex(pageIndex(tree), pageIndex(tree))).toBe(true);
@@ -156,7 +169,7 @@ describe("diffPage", () => {
         ref: `e${i}`,
       })),
     );
-    expect(diffPage(pageIndex([]), after, 2)).toEqual([
+    expect(diffPage(pageIndex([]), after, { max: 2 })).toEqual([
       '+ button "B0" [ref=e0]',
       '+ button "B1" [ref=e1]',
       "… 3 more element changes: run `snapshot -i`",

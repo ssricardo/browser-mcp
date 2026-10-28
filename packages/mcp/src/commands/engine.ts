@@ -40,8 +40,8 @@ import {
   diffPage,
   type PageIndex,
   pageIndex,
+  peekSnapshot,
   sameIndex,
-  takeSnapshot,
 } from "@/commands/snapshot";
 import { TabState } from "@/commands/tab-state";
 import type {
@@ -52,7 +52,8 @@ import type {
 } from "@/contracts";
 import { browserTool } from "@/tools/browser";
 
-type Baseline = { tabId: number; index: PageIndex };
+/** `prefix` is the document's: a different one means the page navigated, and refs are no longer comparable */
+type Baseline = { tabId: number; index: PageIndex; prefix: string };
 
 /**
  * After an action, how long the change report waits for the page to react. A page that hasn't changed within about a fast human's reaction time (`minMs`) is taken as unchanged; one that changes is read once it stops changing (two equal reads `pollMs` apart, no request it started still pending), up to `maxMs`. Tests lower them
@@ -355,15 +356,20 @@ class Engine implements CommandEngine {
           const samePage: boolean =
             !dialog && tabId === baseline.tabId && before?.url === after?.url;
           const next: Baseline | null = samePage
-            ? await this.settledBaseline(baseline, lastRequest)
+            ? await this.settledBaseline(
+                baseline,
+                lastRequest,
+                def.reportsChanges === "always",
+              )
             : null;
-          if (next) {
-            const changes = diffPage(baseline.index, next.index);
-            printed.push(
-              ...(changes.length ? changes : ["(no visible change)"]).map(
-                (line) => `  ${line}`,
-              ),
-            );
+          // A different document under the same URL (a reload): refs aren't comparable, so nothing is reported
+          if (next && next.prefix === baseline.prefix) {
+            const always = def.reportsChanges === "always";
+            const changes = diffPage(baseline.index, next.index, {
+              changed: always,
+            });
+            if (!changes.length && always) changes.push("(no visible change)");
+            printed.push(...changes.map((line) => `  ${line}`));
           }
           if (samePage && tabId !== null) {
             printed.push(...this.apiCalls(tabId, lastRequest));
@@ -435,10 +441,13 @@ class Engine implements CommandEngine {
     return { content, ...(failed ? { isError: true } : {}) };
   }
 
-  /** Waits for the page to react to an action (`settleLimits`), then reads it. Null when it can't be read */
+  /**
+   * Waits for the page to react to an action (`settleLimits`), then reads it. With `floor`, a quiet page is still given `minMs` to react; without it, a page that's quiet when read (no change, no request pending) is returned at once. Null when it can't be read
+   */
   private async settledBaseline(
     previous: Baseline,
     lastRequest: number,
+    floor: boolean,
   ): Promise<Baseline | null> {
     const start = Date.now();
     const pending = () =>
@@ -451,14 +460,15 @@ class Engine implements CommandEngine {
       );
     let last = await this.interactiveBaseline(previous.tabId);
     while (last && Date.now() - start < settleLimits.maxMs) {
+      const waitedFloor = !floor || Date.now() - start >= settleLimits.minMs;
+      const reacted = !sameIndex(previous.index, last.index);
+      if (!pending() && !reacted && waitedFloor) break;
       await sleep(settleLimits.pollMs);
       const next = await this.interactiveBaseline(previous.tabId);
-      if (!next) return last;
-      const stable = sameIndex(last.index, next.index) && !pending();
-      const reacted = !sameIndex(previous.index, next.index);
+      if (!next) break;
+      const stable = sameIndex(last.index, next.index);
       last = next;
-      if (stable && (reacted || Date.now() - start >= settleLimits.minMs))
-        break;
+      if (stable && !pending() && (reacted || waitedFloor)) break;
     }
     return last;
   }
@@ -492,8 +502,8 @@ class Engine implements CommandEngine {
     const page = tabId === null ? undefined : this.states.get(tabId)?.page;
     if (tabId === null || !page) return null;
     try {
-      const nodes = await takeSnapshot(page);
-      return { tabId, index: pageIndex(nodes) };
+      const { nodes, prefix } = await peekSnapshot(page);
+      return { tabId, index: pageIndex(nodes), prefix };
     } catch {
       return null;
     }

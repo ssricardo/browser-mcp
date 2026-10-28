@@ -77,8 +77,10 @@ export type CommandDef = {
   /** Details for `help <command>` */
   help: string;
   flags?: FlagSpec;
-  /** Can change the page's interactive elements (a new field, an enabled button), so the engine reports what appeared or went away */
-  reportsChanges?: boolean;
+  /**
+   * Can change the page's interactive elements (a new field, an enabled button), so the engine reports what appeared or went away. `always`: also what changed, and `(no visible change)` when nothing did, after waiting a human's reaction time (clicks, keys: their effect isn't obvious). `changes`: only new and gone elements and texts, and no waiting when the page is quiet (fills, checks: they change their own field, and a form is filled in batches)
+   */
+  reportsChanges?: "always" | "changes";
   /** Navigates by design, so the engine doesn't note the URL change */
   navigates?: boolean;
   /** Doesn't need a page (tab commands, help, wait <ms>) */
@@ -446,7 +448,7 @@ export const COMMANDS: CommandDef[] = [
   })),
   {
     name: "click",
-    reportsChanges: true,
+    reportsChanges: "always",
     usage:
       "click <target> [--double] [--button right|middle] [--modifiers Shift,Control]",
     help: "Clicks the element's center after scrolling it into view. Fails if it's hidden, disabled or covered (naming what covers it). Waits for a navigation it starts.",
@@ -631,7 +633,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "fill",
-    reportsChanges: true,
+    reportsChanges: "changes",
     usage: 'fill <target> "<text>" [--submit]',
     help: "Replaces the field's value (input, textarea, contenteditable). --submit presses Enter after. The text isn't echoed back.",
     flags: { submit: false },
@@ -685,7 +687,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "press",
-    reportsChanges: true,
+    reportsChanges: "always",
     usage: "press <key>   # Enter, Escape, ArrowDown, Control+a",
     help: "Presses a key or combination on the focused element: Enter, Tab, Escape, ArrowDown, Control+a, Meta+Shift+K. Waits for a navigation it starts.",
     maxArgs: 1,
@@ -698,7 +700,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "select",
-    reportsChanges: true,
+    reportsChanges: "changes",
     usage: 'select <target> "<value>"...   # by value or label',
     help: "Selects options of a <select> by value or label (several for a multiple select).",
     maxArgs: Infinity,
@@ -720,7 +722,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "check",
-    reportsChanges: true,
+    reportsChanges: "changes",
     usage: "check <target>",
     help: "Checks a checkbox, radio or switch (nothing if already checked).",
     maxArgs: 1,
@@ -728,7 +730,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "uncheck",
-    reportsChanges: true,
+    reportsChanges: "changes",
     usage: "uncheck <target>",
     help: "Unchecks a checkbox or switch (nothing if already unchecked).",
     maxArgs: 1,
