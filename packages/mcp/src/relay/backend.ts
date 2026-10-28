@@ -378,6 +378,10 @@ export class RelayBackend implements BrowserBackend {
     return this.extension?.state.tabs ?? [];
   }
 
+  restriction(): { hiddenTabs: number } | null {
+    return this.extension?.state.restricted ?? null;
+  }
+
   async createTab(options: { url?: string; app: AppInfo }): Promise<number> {
     const extension = this.usableExtension();
     const { tabId } = await extension.request("createTab", options);

@@ -109,6 +109,8 @@ export interface BrowserBackend {
   readonly paused: boolean;
   /** The tabs the extension reports */
   tabs(): ExposedTab[];
+  /** When the user limited agents to the tabs they enable: how many other tabs are open that they may not use yet. `null` when every tab is available */
+  restriction?(): { hiddenTabs: number } | null;
 
   /** Opens a background tab in the app's group. Doesn't attach the debugger */
   createTab(options: { url?: string; app: AppInfo }): Promise<number>;
