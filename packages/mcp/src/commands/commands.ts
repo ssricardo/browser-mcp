@@ -16,6 +16,7 @@ import {
   withSettle,
 } from "@/commands/actions";
 import { sendCdp, subscribe } from "@/commands/cdp";
+import { addHints, formFields, renderForm } from "@/commands/form";
 import { HIDDEN_TAB_MESSAGE, hiddenTabs } from "@/commands/hidden-tabs";
 import {
   cap,
@@ -76,6 +77,8 @@ export type CommandDef = {
   /** Details for `help <command>` */
   help: string;
   flags?: FlagSpec;
+  /** Can change the page's interactive elements (a new field, an enabled button), so the engine reports what appeared or went away */
+  reportsChanges?: boolean;
   /** Navigates by design, so the engine doesn't note the URL change */
   navigates?: boolean;
   /** Doesn't need a page (tab commands, help, wait <ms>) */
@@ -342,14 +345,8 @@ async function screenshot(ctx: StepContext) {
   }
 }
 
-async function snapshotCommand(ctx: StepContext) {
-  const page = await ctx.page();
-  const max = readCap(ctx.args.flags.max);
-  const depthFlag = ctx.args.flags.depth;
-  const depth = depthFlag === undefined ? Infinity : Number(depthFlag);
-  if (depthFlag !== undefined && (!Number.isInteger(depth) || depth < 1)) {
-    throw new StepError("--depth takes a number ≥ 1");
-  }
+/** The full snapshot, or the subtree of the step's first argument (a ref or a locator). Refs stay valid either way, since they resolve against the full snapshot */
+async function scopedSnapshot(ctx: StepContext, page: Page) {
   const scope = ctx.args.positional[0]
     ? parseTarget(ctx.args.positional[0].text)
     : undefined;
@@ -362,20 +359,33 @@ async function snapshotCommand(ctx: StepContext) {
       (await locator.ariaSnapshotJSON({ mode: "ai" })) as { ref?: string }[]
     )[0]?.ref;
   }
-  let nodes = await takeSnapshot(page);
+  const nodes = await takeSnapshot(page);
   if (scopeRef && scope?.kind !== "ref") scopeRef = shortRef(page, scopeRef);
-  if (scopeRef) {
-    const node = findByRef(nodes, scopeRef);
-    if (!node) {
-      throw new StepError(
-        scope?.kind === "ref"
-          ? `Ref ${scopeRef} isn't on the page anymore. Run \`snapshot -i\` or use a locator`
-          : `${scope?.source} isn't in the accessibility tree (hidden or aria-hidden)`,
-      );
-    }
-    nodes = [node];
+  if (!scopeRef) return nodes;
+  const node = findByRef(nodes, scopeRef);
+  if (!node) {
+    throw new StepError(
+      scope?.kind === "ref"
+        ? `Ref ${scopeRef} isn't on the page anymore. Run \`snapshot -i\` or use a locator`
+        : `${scope?.source} isn't in the accessibility tree (hidden or aria-hidden)`,
+    );
   }
-  if (ctx.args.flags.i) nodes = interactiveOnly(nodes);
+  return [node];
+}
+
+async function snapshotCommand(ctx: StepContext) {
+  const page = await ctx.page();
+  const max = readCap(ctx.args.flags.max);
+  const depthFlag = ctx.args.flags.depth;
+  const depth = depthFlag === undefined ? Infinity : Number(depthFlag);
+  if (depthFlag !== undefined && (!Number.isInteger(depth) || depth < 1)) {
+    throw new StepError("--depth takes a number ≥ 1");
+  }
+  let nodes = await scopedSnapshot(ctx, page);
+  if (ctx.args.flags.i) {
+    nodes = interactiveOnly(nodes);
+    await addHints(page, nodes);
+  }
   const text = render(nodes, depth);
   ctx.print(
     cap(text || (ctx.args.flags.i ? "(nothing interactive)" : "(empty)"), max),
@@ -436,6 +446,7 @@ export const COMMANDS: CommandDef[] = [
   })),
   {
     name: "click",
+    reportsChanges: true,
     usage:
       "click <target> [--double] [--button right|middle] [--modifiers Shift,Control]",
     help: "Clicks the element's center after scrolling it into view. Fails if it's hidden, disabled or covered (naming what covers it). Waits for a navigation it starts.",
@@ -620,6 +631,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "fill",
+    reportsChanges: true,
     usage: 'fill <target> "<text>" [--submit]',
     help: "Replaces the field's value (input, textarea, contenteditable). --submit presses Enter after. The text isn't echoed back.",
     flags: { submit: false },
@@ -673,6 +685,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "press",
+    reportsChanges: true,
     usage: "press <key>   # Enter, Escape, ArrowDown, Control+a",
     help: "Presses a key or combination on the focused element: Enter, Tab, Escape, ArrowDown, Control+a, Meta+Shift+K. Waits for a navigation it starts.",
     maxArgs: 1,
@@ -685,6 +698,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "select",
+    reportsChanges: true,
     usage: 'select <target> "<value>"...   # by value or label',
     help: "Selects options of a <select> by value or label (several for a multiple select).",
     maxArgs: Infinity,
@@ -706,6 +720,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "check",
+    reportsChanges: true,
     usage: "check <target>",
     help: "Checks a checkbox, radio or switch (nothing if already checked).",
     maxArgs: 1,
@@ -713,6 +728,7 @@ export const COMMANDS: CommandDef[] = [
   },
   {
     name: "uncheck",
+    reportsChanges: true,
     usage: "uncheck <target>",
     help: "Unchecks a checkbox or switch (nothing if already unchecked).",
     maxArgs: 1,
@@ -907,6 +923,20 @@ export const COMMANDS: CommandDef[] = [
     flags: { i: false, depth: true, max: true },
     maxArgs: 1,
     run: snapshotCommand,
+  },
+  {
+    name: "form",
+    usage:
+      "form [<target>] [--max N]   # the form's fields: question, ref, value, required, options",
+    help: "Lists the form fields on the page (or in the target) grouped by the question they answer: each field's ref, label, current value, required/invalid/disabled state and options (native selects, radio groups), and the buttons that add rows. `!` marks a required field that's still empty. Use it before filling a form instead of a snapshot.",
+    flags: { max: true },
+    maxArgs: 1,
+    async run(ctx) {
+      const page = await ctx.page();
+      const nodes = await scopedSnapshot(ctx, page);
+      const fields = await formFields(page, nodes);
+      ctx.print(cap(renderForm(fields), readCap(ctx.args.flags.max)));
+    },
   },
   {
     name: "find",

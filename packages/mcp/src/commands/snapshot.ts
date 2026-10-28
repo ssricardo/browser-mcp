@@ -118,12 +118,48 @@ function isKept(node: AriaNode): boolean {
   return node.role === "heading";
 }
 
-/** `-i`: drops what isn't kept and unnamed wrappers, keeping the ancestors of kept nodes */
+/** Form controls whose purpose is usually given by the text before them, not by their own name */
+export const FORM_CONTROLS = new Set([
+  "textbox",
+  "searchbox",
+  "checkbox",
+  "radio",
+  "radiogroup",
+  "combobox",
+  "listbox",
+  "switch",
+  "slider",
+  "spinbutton",
+]);
+export const LABEL_MAX = 160;
+
+/** The visible text of a plain text node, or of an unnamed layout node that holds only text: a candidate label for the control after it */
+function labelText(node: AriaNode): string | undefined {
+  const raw =
+    node.role === "text"
+      ? node.text
+      : LAYOUT.has(node.role) && !node.name && !node.children?.length
+        ? node.text
+        : undefined;
+  const text = raw?.replace(/\s+/g, " ").trim();
+  return text && text.length > 1 ? truncate(text, LABEL_MAX) : undefined;
+}
+
+/** `-i`: drops what isn't kept and unnamed wrappers, keeping the ancestors of kept nodes and the text right before a form control (its label) */
 export function interactiveOnly(nodes: AriaNode[]): AriaNode[] {
+  return keepLabelText(prune(nodes));
+}
+
+function prune(nodes: AriaNode[]): AriaNode[] {
   const out: AriaNode[] = [];
   for (const node of nodes) {
+    const label = labelText(node);
+    if (label) {
+      out.push({ role: "text", text: label });
+      continue;
+    }
     if (node.role === "text") continue;
-    const children = interactiveOnly(node.children ?? []);
+    const children = prune(node.children ?? []);
     const kept = isKept(node);
     if (!kept && children.length === 0) continue;
     const wrapper =
@@ -145,6 +181,106 @@ export function interactiveOnly(nodes: AriaNode[]): AriaNode[] {
     });
   }
   return out;
+}
+
+/** Drops the text nodes that aren't immediately followed by a form control, at every level */
+function keepLabelText(nodes: AriaNode[]): AriaNode[] {
+  const out: AriaNode[] = [];
+  nodes.forEach((node, index) => {
+    if (node.role === "text") {
+      const next = nodes[index + 1];
+      const echo =
+        nodes[index - 1]?.name === node.text || next?.name === node.text;
+      if (next && FORM_CONTROLS.has(next.role) && !echo) out.push(node);
+      return;
+    }
+    out.push(
+      node.children?.length
+        ? { ...node, children: keepLabelText(node.children) }
+        : node,
+    );
+  });
+  return out;
+}
+
+/** What the change report compares: interactive nodes by ref, as the line they render to (without `active`, which changes with every click), and the page's short texts (messages, errors, headings) */
+export type PageIndex = { controls: Map<string, string>; texts: Set<string> };
+
+const TEXT_MAX = 200;
+/** Text that's only an icon's ligature (Material icons render `add`, `help`, `info` as text) */
+const ICON_TEXT = /^[a-z_]{2,24}$/;
+
+export function pageIndex(nodes: AriaNode[]): PageIndex {
+  const controls = new Map<string, string>();
+  const texts = new Set<string>();
+  const addText = (raw: unknown) => {
+    const text = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
+    if (text.length > 1 && text.length <= TEXT_MAX && !ICON_TEXT.test(text))
+      texts.add(text);
+  };
+  const walk = (list: AriaNode[]) => {
+    for (const node of list) {
+      const control =
+        node.ref &&
+        (INTERACTIVE.has(node.role) || FORM_CONTROLS.has(node.role));
+      if (control) {
+        const { children, ...rest } = node;
+        controls.set(
+          node.ref as string,
+          nodeLine({ ...rest, active: undefined }),
+        );
+      } else {
+        addText(node.role === "text" ? node.text : (node.text ?? undefined));
+        if (node.role === "heading" || node.role === "alert")
+          addText(node.name);
+      }
+      walk(node.children ?? []);
+    }
+  };
+  walk(nodes);
+  return { controls, texts };
+}
+
+export function sameIndex(a: PageIndex, b: PageIndex): boolean {
+  if (a.controls.size !== b.controls.size || a.texts.size !== b.texts.size)
+    return false;
+  for (const [ref, line] of a.controls)
+    if (b.controls.get(ref) !== line) return false;
+  for (const text of a.texts) if (!b.texts.has(text)) return false;
+  return true;
+}
+
+/** What an action changed: new (`+`), gone (`-`) and changed (`~`) interactive elements, then texts that appeared (`+ text:`, error messages, toasts) or went away. Each list is capped; past the cap it says how many more, so a whole new step reads as a summary */
+export function diffPage(
+  before: PageIndex,
+  after: PageIndex,
+  max = 10,
+): string[] {
+  const controls: string[] = [];
+  for (const [ref, line] of after.controls) {
+    const old = before.controls.get(ref);
+    if (old === undefined) controls.push(`+ ${line}`);
+    else if (old !== line) controls.push(`~ ${line}`);
+  }
+  for (const [ref, line] of before.controls) {
+    if (!after.controls.has(ref)) controls.push(`- ${line}`);
+  }
+  const added = [...after.texts].filter((text) => !before.texts.has(text));
+  const gone = [...before.texts].filter((text) => !after.texts.has(text));
+  const texts = [
+    ...added.map((text) => `+ text: ${text}`),
+    ...gone.map((text) => `- text: ${text}`),
+  ];
+  const textMax = Math.max(3, Math.floor(max / 2));
+  const lines = controls.slice(0, max);
+  if (controls.length > max)
+    lines.push(
+      `… ${controls.length - max} more element changes: run \`snapshot -i\``,
+    );
+  lines.push(...texts.slice(0, textMax));
+  if (texts.length > textMax)
+    lines.push(`… ${texts.length - textMax} more text changes`);
+  return lines;
 }
 
 export function findByRef(
@@ -236,7 +372,7 @@ function pathLabel(node: AriaNode): string | undefined {
   if (LANDMARKS.has(node.role) || node.role === "dialog") return node.role;
 }
 
-function truncate(text: string | undefined, max: number) {
+export function truncate(text: string | undefined, max: number) {
   if (!text || text.length <= max) return text;
   return `${text.slice(0, max - 1)}…`;
 }
