@@ -109,6 +109,8 @@ export interface BrowserBackend {
   readonly paused: boolean;
   /** The tabs the extension reports */
   tabs(): ExposedTab[];
+  /** The tab the extension reports with this ID, waiting briefly for one it doesn't list yet: it reports a new tab a moment after it appears */
+  findTab(tabId: number): Promise<ExposedTab | undefined>;
   /** When the user limited agents to the tabs they enable: how many other tabs are open that they may not use yet. `null` when every tab is available */
   restriction?(): { hiddenTabs: number } | null;
 
